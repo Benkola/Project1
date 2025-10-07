@@ -1,0 +1,93 @@
+{
+  "info": {
+    "name": "TTSR",
+    "_postman_id": "00000000-0000-0000-0000-ttsr-collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Travel Trust & Safety Risk Scorer – OAuth2 CC stub + idempotency demo"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "https://api.example.com"},
+    {"key": "authUrl", "value": "https://auth.example.com/oauth2/token"},
+    {"key": "client_id", "value": "demo"},
+    {"key": "client_secret", "value": "demo"},
+    {"key": "event_id", "value": "evt-001"},
+    {"key": "idempotency_key", "value": "123e4567-e89b-12d3-a456-426614174000"}
+  ],
+  "item": [
+    {
+      "name": "Get Token (stub)",
+      "request": {
+        "method": "POST",
+        "header": [{"key":"Content-Type","value":"application/x-www-form-urlencoded"}],
+        "url": "{{authUrl}}",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {"key":"client_id","value":"{{client_id}}"},
+            {"key":"client_secret","value":"{{client_secret}}"},
+            {"key":"scope","value":"score:write events:read"}
+          ]
+        }
+      }
+    },
+    {
+      "name": "Score Event",
+      "event": [{
+        "listen": "prerequest",
+        "script": {
+          "type": "text/javascript",
+          "exec": [
+            "if (!pm.environment.get('access_token')) {",
+            " pm.sendRequest({",
+            "   url: pm.variables.get('authUrl'),",
+            "   method:'POST',",
+            "   header:{'Content-Type':'application/x-www-form-urlencoded'},",
+            "   body:{ mode:'urlencoded', urlencoded:[",
+            "     {key:'client_id',value:pm.variables.get('client_id')},",
+            "     {key:'client_secret',value:pm.variables.get('client_secret')},",
+            "     {key:'scope',value:'score:write'}]}",
+            " }, (err,res)=>{ if(!err){ pm.environment.set('access_token', res.json().access_token);} });",
+            "}"
+          ]
+        }
+      }],
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key":"Authorization","value":"Bearer {{access_token}}"},
+          {"key":"Idempotency-Key","value":"{{idempotency_key}}"},
+          {"key":"Content-Type","value":"application/json"}
+        ],
+        "url": "{{baseUrl}}/v1/score",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"event_id\": \"{{event_id}}\",\n  \"source\": \"flight\",\n  \"signals\": {\"delay\":0.7, \"weather\":0.5, \"geo\":0.2, \"payment\":0}\n}"
+        }
+      }
+    },
+    {
+      "name": "Get Event",
+      "request": {
+        "method": "GET",
+        "header": [{"key":"Authorization","value":"Bearer {{access_token}}"}],
+        "url": "{{baseUrl}}/v1/events/{{event_id}}"
+      }
+    },
+    {
+      "name": "Webhook Test",
+      "request": {
+        "method": "POST",
+        "header": [{"key":"Authorization","value":"Bearer {{access_token}}"},{"key":"Content-Type","value":"application/json"}],
+        "url": "{{baseUrl}}/v1/webhooks/test",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"event_id\": \"{{event_id}}\",\n  \"target_url\": \"https://webhook.site/replace-with-your-id\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{baseUrl}}/v1/health" }
+    }
+  ]
+}

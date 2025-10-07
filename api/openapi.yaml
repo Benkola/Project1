@@ -1,0 +1,244 @@
+openapi: 3.0.3
+info:
+  title: TTSR API
+  version: 1.0.0
+  description: >
+    Privacy-first Travel Trust & Safety Risk Scorer (rules v0). OAuth2 Client Credentials,
+    idempotency, HMAC-signed webhooks, and minimal health endpoint.
+servers:
+  - url: https://api.example.com
+    description: Production
+  - url: https://api.sandbox.example.com
+    description: Sandbox
+tags:
+  - name: Scoring
+  - name: Events
+  - name: Webhooks
+  - name: Health
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.example.com/oauth2/token
+          scopes:
+            score:write: Submit events for scoring
+            events:read: Read events and audit records
+  headers:
+    X-RateLimit-Limit:
+      description: The number of allowed requests in the current window.
+      schema: { type: integer, format: int32 }
+    X-RateLimit-Remaining:
+      description: The number of remaining requests in the current window.
+      schema: { type: integer, format: int32 }
+    X-RateLimit-Reset:
+      description: UTC epoch seconds when the current window resets.
+      schema: { type: integer, format: int64 }
+  schemas:
+    ScoreRequest:
+      type: object
+      required: [event_id, source, signals]
+      properties:
+        event_id:
+          type: string
+          description: Unique ID for this event within the tenant.
+          example: "evt-001"
+        source:
+          type: string
+          description: Source system or domain (e.g., flight, hotel).
+          example: "flight"
+        signals:
+          type: object
+          additionalProperties:
+            type: number
+          description: >
+            Numeric signals in [0..1] e.g. delay, weather, geo, payment.
+          example:
+            delay: 0.7
+            weather: 0.5
+            geo: 0.2
+            payment: 0
+    ScoreResponse:
+      type: object
+      required: [event_id, score, action]
+      properties:
+        event_id: { type: string, example: "evt-001" }
+        score: { type: number, format: float, example: 62.5 }
+        action:
+          type: string
+          enum: [allow, review, hold]
+          example: review
+        trace_id:
+          type: string
+          description: Trace identifier for observability correlation.
+          example: "1-679ad83a-2f31fca4f2e8d7f111111111"
+    Event:
+      type: object
+      properties:
+        id: { type: string, example: "evt-001" }
+        tenant: { type: string, example: "demo" }
+        source: { type: string, example: "flight" }
+        ts: { type: integer, format: int64, example: 1730745600 }
+        signals:
+          type: object
+          additionalProperties: true
+        score_v: { type: string, example: "v0_rules" }
+        score: { type: number, example: 62.5 }
+        action: { type: string, enum: [allow, review, hold] }
+        idempotency_key: { type: string, example: "123e4567-e89b-12d3-a456-426614174000" }
+        status: { type: string, example: "scored" }
+    WebhookTestRequest:
+      type: object
+      required: [event_id, target_url]
+      properties:
+        event_id: { type: string, example: "evt-001" }
+        target_url:
+          type: string
+          format: uri
+          example: "https://webhook.site/xxxx-xxxx"
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: bad_request
+        message:
+          type: string
+          example: Missing Idempotency-Key
+        trace_id:
+          type: string
+          example: "1-679ad83a-2f31fca4f2e8d7f111111111"
+security:
+  - oauth2: []
+paths:
+  /v1/score:
+    post:
+      tags: [Scoring]
+      summary: Submit an event for scoring (idempotent via Idempotency-Key)
+      description: >
+        Provide an Idempotency-Key header to safely retry the POST without creating duplicate work.
+      security:
+        - oauth2: [score:write]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          description: Unique key to safely retry POST.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScoreRequest" }
+      responses:
+        "202":
+          description: Accepted
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/X-RateLimit-Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/X-RateLimit-Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/X-RateLimit-Reset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoreResponse" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Rate limit exceeded
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/X-RateLimit-Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/X-RateLimit-Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/X-RateLimit-Reset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/events/{id}:
+    get:
+      tags: [Events]
+      summary: Get a scored event by ID
+      security:
+        - oauth2: [events:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Event found
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/X-RateLimit-Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/X-RateLimit-Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/X-RateLimit-Reset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/webhooks/test:
+    post:
+      tags: [Webhooks]
+      summary: Fire a signed test webhook for an event (admin/test usage)
+      description: Enqueues a signed webhook for delivery to a test endpoint.
+      security:
+        - oauth2: [events:read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookTestRequest" }
+      responses:
+        "202":
+          description: Enqueued for delivery
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "enqueued" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  ts: { type: integer, format: int64, example: 1730745600 }
