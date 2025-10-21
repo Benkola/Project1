@@ -38,7 +38,6 @@ resource "aws_dynamodb_table" "events" {
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-
     principals {
       type        = "Service"
       identifiers = ["lambda.amazonaws.com"]
@@ -51,16 +50,22 @@ resource "aws_iam_role" "lambda" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
-# Minimal policy: CloudWatch logs + DynamoDB access
+# Minimal policy: CloudWatch logs + DynamoDB + X-Ray
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
-    actions   = ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"]
+    actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["*"]
   }
 
   statement {
-    actions   = ["dynamodb:GetItem","dynamodb:PutItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DescribeTable"]
     resources = [aws_dynamodb_table.events.arn]
+  }
+
+
+  statement {
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    resources = ["*"]
   }
 }
 
@@ -70,35 +75,39 @@ resource "aws_iam_role_policy" "lambda_inline" {
   policy = data.aws_iam_policy_document.lambda_policy.json
 }
 
-# Package Lambdas from api/handlers
-data "archive_file" "score_zip" {
+# Package handlers (single zip reused for all functions)
+data "archive_file" "handlers_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../api/handlers"
-  output_path = "${path.module}/build/score.zip"
+  output_path = "${path.module}/build/handlers.zip"
 }
 
-data "archive_file" "get_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/../api/handlers"
-  output_path = "${path.module}/build/get_event.zip"
+# Helper: API Gateway Lambda invoke URI (REST API format)
+locals {
+  apigw_lambda_uri = "arn:aws:apigateway:${var.region}:lambda:path/2015-03-31/functions"
 }
 
-data "archive_file" "health_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/../api/handlers"
-  output_path = "${path.module}/build/health.zip"
+# Lambdas (with X-Ray tracing)
+resource "aws_lambda_function" "health" {
+  function_name    = "${local.name}-health"
+  role             = aws_iam_role.lambda.arn
+  handler          = "health_handler.handler"
+  runtime          = "python3.11"
+  filename         = data.archive_file.handlers_zip.output_path
+  source_code_hash = data.archive_file.handlers_zip.output_base64sha256
+  timeout          = 5
+  tracing_config { mode = "Active" }
 }
 
-# Lambda functions
 resource "aws_lambda_function" "score" {
   function_name    = "${local.name}-score"
   role             = aws_iam_role.lambda.arn
   handler          = "score_handler.handler"
   runtime          = "python3.11"
-  filename         = data.archive_file.score_zip.output_path
-  source_code_hash = data.archive_file.score_zip.output_base64sha256
+  filename         = data.archive_file.handlers_zip.output_path
+  source_code_hash = data.archive_file.handlers_zip.output_base64sha256
   timeout          = 10
-
+  tracing_config { mode = "Active" }
   environment {
     variables = {
       TABLE  = aws_dynamodb_table.events.name
@@ -112,10 +121,10 @@ resource "aws_lambda_function" "get_event" {
   role             = aws_iam_role.lambda.arn
   handler          = "get_event.handler"
   runtime          = "python3.11"
-  filename         = data.archive_file.get_zip.output_path
-  source_code_hash = data.archive_file.get_zip.output_base64sha256
+  filename         = data.archive_file.handlers_zip.output_path
+  source_code_hash = data.archive_file.handlers_zip.output_base64sha256
   timeout          = 10
-
+  tracing_config { mode = "Active" }
   environment {
     variables = {
       TABLE  = aws_dynamodb_table.events.name
@@ -124,14 +133,40 @@ resource "aws_lambda_function" "get_event" {
   }
 }
 
-resource "aws_lambda_function" "health" {
-  function_name    = "${local.name}-health"
+# Token issuer (OAuth2 Client Credentials stub)
+resource "aws_lambda_function" "token_stub" {
+  function_name    = "${local.name}-token"
   role             = aws_iam_role.lambda.arn
-  handler          = "health_handler.handler"
+  handler          = "token_stub.handler"
   runtime          = "python3.11"
-  filename         = data.archive_file.health_zip.output_path
-  source_code_hash = data.archive_file.health_zip.output_base64sha256
+  filename         = data.archive_file.handlers_zip.output_path
+  source_code_hash = data.archive_file.handlers_zip.output_base64sha256
   timeout          = 5
+  tracing_config { mode = "Active" }
+  environment {
+    variables = {
+      AUTH_CLIENTS_JSON   = jsonencode({ "demo" = { "secret" = "demo-secret", "scopes" = ["score:write", "events:read"] } })
+      AUTH_SIGNING_SECRET = "change-me-please"
+      TOKEN_TTL_SECONDS   = "3600"
+    }
+  }
+}
+
+# Lambda Authorizer
+resource "aws_lambda_function" "authorizer" {
+  function_name    = "${local.name}-authorizer"
+  role             = aws_iam_role.lambda.arn
+  handler          = "auth_authorizer.handler"
+  runtime          = "python3.11"
+  filename         = data.archive_file.handlers_zip.output_path
+  source_code_hash = data.archive_file.handlers_zip.output_base64sha256
+  timeout          = 5
+  tracing_config { mode = "Active" }
+  environment {
+    variables = {
+      AUTH_SIGNING_SECRET = "change-me-please"
+    }
+  }
 }
 
 # API Gateway REST
@@ -147,7 +182,7 @@ resource "aws_api_gateway_resource" "v1" {
   path_part   = "v1"
 }
 
-# /v1/health GET
+# /v1/health GET (public)
 resource "aws_api_gateway_resource" "health" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_resource.v1.id
@@ -167,10 +202,10 @@ resource "aws_api_gateway_integration" "health_get" {
   http_method             = aws_api_gateway_method.health_get.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.health.invoke_arn
+  uri                     = "${local.apigw_lambda_uri}/${aws_lambda_function.health.arn}/invocations"
 }
 
-# /v1/score POST
+# /v1/score POST (secured)
 resource "aws_api_gateway_resource" "score" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_resource.v1.id
@@ -181,7 +216,8 @@ resource "aws_api_gateway_method" "score_post" {
   rest_api_id   = aws_api_gateway_rest_api.api.id
   resource_id   = aws_api_gateway_resource.score.id
   http_method   = "POST"
-  authorization = "NONE" # Day 4: change to CUSTOM or COGNITO
+  authorization = "CUSTOM"
+  authorizer_id = aws_api_gateway_authorizer.custom_auth.id
 }
 
 resource "aws_api_gateway_integration" "score_post" {
@@ -190,10 +226,10 @@ resource "aws_api_gateway_integration" "score_post" {
   http_method             = aws_api_gateway_method.score_post.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.score.invoke_arn
+  uri                     = "${local.apigw_lambda_uri}/${aws_lambda_function.score.arn}/invocations"
 }
 
-# /v1/events/{id} GET
+# /v1/events/{id} GET (secured)
 resource "aws_api_gateway_resource" "events" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_resource.v1.id
@@ -210,8 +246,8 @@ resource "aws_api_gateway_method" "event_get" {
   rest_api_id   = aws_api_gateway_rest_api.api.id
   resource_id   = aws_api_gateway_resource.event_id.id
   http_method   = "GET"
-  authorization = "NONE"
-
+  authorization = "CUSTOM"
+  authorizer_id = aws_api_gateway_authorizer.custom_auth.id
   request_parameters = {
     "method.request.path.id" = true
   }
@@ -223,14 +259,52 @@ resource "aws_api_gateway_integration" "event_get" {
   http_method             = aws_api_gateway_method.event_get.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.get_event.invoke_arn
-
+  uri                     = "${local.apigw_lambda_uri}/${aws_lambda_function.get_event.arn}/invocations"
   request_parameters = {
     "integration.request.path.id" = "method.request.path.id"
   }
 }
 
-# Lambda permissions so API Gateway can invoke them
+# /v1/oauth2/token POST (public)
+resource "aws_api_gateway_resource" "oauth2" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_resource.v1.id
+  path_part   = "oauth2"
+}
+
+resource "aws_api_gateway_resource" "token" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "token"
+}
+
+resource "aws_api_gateway_method" "token_post" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.token.id
+  http_method   = "POST"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "token_post" {
+  rest_api_id             = aws_api_gateway_rest_api.api.id
+  resource_id             = aws_api_gateway_resource.token.id
+  http_method             = aws_api_gateway_method.token_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = "${local.apigw_lambda_uri}/${aws_lambda_function.token_stub.arn}/invocations"
+}
+
+# Authorizer (TOKEN type)
+resource "aws_api_gateway_authorizer" "custom_auth" {
+  name                             = "${local.name}-auth"
+  rest_api_id                      = aws_api_gateway_rest_api.api.id
+  type                             = "TOKEN"
+  identity_source                  = "method.request.header.Authorization"
+  authorizer_uri                   = "${local.apigw_lambda_uri}/${aws_lambda_function.authorizer.arn}/invocations"
+  authorizer_result_ttl_in_seconds = 60
+}
+
+# Lambda permissions (API Gateway -> Lambda)
 resource "aws_lambda_permission" "allow_apigw_health" {
   statement_id  = "AllowAPIGatewayInvokeHealth"
   action        = "lambda:InvokeFunction"
@@ -255,18 +329,37 @@ resource "aws_lambda_permission" "allow_apigw_event" {
   source_arn    = "${aws_api_gateway_rest_api.api.execution_arn}/*/GET/v1/events/*"
 }
 
-# Deploy stage
+resource "aws_lambda_permission" "allow_apigw_token" {
+  statement_id  = "AllowAPIGatewayInvokeToken"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.token_stub.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.api.execution_arn}/*/POST/v1/oauth2/token"
+}
+
+resource "aws_lambda_permission" "allow_apigw_authorizer" {
+  statement_id  = "AllowAPIGatewayInvokeAuthorizer"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.authorizer.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.api.execution_arn}/authorizers/*"
+}
+
+# Deployment (create new before destroying old)
 resource "aws_api_gateway_deployment" "deploy" {
   rest_api_id = aws_api_gateway_rest_api.api.id
+  triggers    = { redeploy = timestamp() }
 
-  triggers = {
-    redeploy = timestamp()
+  lifecycle {
+    create_before_destroy = true
   }
 
   depends_on = [
     aws_api_gateway_integration.health_get,
     aws_api_gateway_integration.score_post,
-    aws_api_gateway_integration.event_get
+    aws_api_gateway_integration.event_get,
+    aws_api_gateway_integration.token_post,
+    aws_api_gateway_authorizer.custom_auth
   ]
 }
 
