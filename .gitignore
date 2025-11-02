@@ -1,25 +1,23 @@
 # Python
+.venv/
 __pycache__/
 *.pyc
-.venv/
-env/
-venv/
-dist/
-build/
-*.zip
-
-# Node
-node_modules/
-npm-debug.log*
+*.pyo
+*.pyd
 
 # Terraform
-.terraform/
-terraform.tfstate*
-.terraform.lock.hcl
+infra/.terraform/
+infra/tfplan
+*.tfstate
+*.tfstate.backup
+
+# Logs
+*.log
 
 # macOS
 .DS_Store
 
-# Misc
-.env
-.aws-sam/
+# IDEs
+.vscode/
+.idea/
+
