@@ -4,9 +4,10 @@ provider "aws" {
 
 locals {
   project = "ttsr"
-  stage   = "dev"
+  stage   = terraform.workspace
   name    = "${local.project}-${local.stage}"
 }
+
 
 # KMS key (placeholder for secrets)
 resource "aws_kms_key" "app" {
@@ -189,7 +190,7 @@ resource "aws_api_gateway_authorizer" "ttsr" {
 }
 
 resource "aws_lambda_permission" "apigw_auth_invoke" {
-  statement_id  = "AllowAPIGatewayInvokeAuthorizer"
+  statement_id  = "AllowAPIGatewayInvokeAuthorizer-${local.stage}-${timestamp()}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.authorizer.function_name
   principal     = "apigateway.amazonaws.com"
@@ -231,29 +232,6 @@ resource "aws_api_gateway_resource" "score" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_resource.v1.id
   path_part   = "score"
-}
-
-# /v1/events/{id} GET (secured)
-resource "aws_api_gateway_method" "events_get" {
-  rest_api_id = aws_api_gateway_rest_api.api.id
-  resource_id = aws_api_gateway_resource.event_id.id
-  http_method = "GET"
-
-  authorization = "CUSTOM"
-  authorizer_id = aws_api_gateway_authorizer.ttsr.id
-
-  request_parameters = {
-    "method.request.path.id" = true
-  }
-}
-
-resource "aws_api_gateway_integration" "events_get" {
-  rest_api_id             = aws_api_gateway_rest_api.api.id
-  resource_id             = aws_api_gateway_resource.event_id.id
-  http_method             = aws_api_gateway_method.events_get.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = "${local.apigw_lambda_uri}/${aws_lambda_function.get_event.arn}/invocations"
 }
 
 resource "aws_api_gateway_method" "score_post" {
@@ -350,7 +328,7 @@ resource "aws_api_gateway_authorizer" "custom_auth" {
 
 # Lambda permissions (API Gateway -> Lambda)
 resource "aws_lambda_permission" "allow_apigw_health" {
-  statement_id  = "AllowAPIGatewayInvokeHealth"
+  statement_id  = "AllowAPIGatewayInvokeHealth-${local.stage}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.health.function_name
   principal     = "apigateway.amazonaws.com"
@@ -358,7 +336,7 @@ resource "aws_lambda_permission" "allow_apigw_health" {
 }
 
 resource "aws_lambda_permission" "allow_apigw_score" {
-  statement_id  = "AllowAPIGatewayInvokeScore"
+  statement_id  = "AllowAPIGatewayInvokeScore-${local.stage}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.score.function_name
   principal     = "apigateway.amazonaws.com"
@@ -366,7 +344,7 @@ resource "aws_lambda_permission" "allow_apigw_score" {
 }
 
 resource "aws_lambda_permission" "allow_apigw_event" {
-  statement_id  = "AllowAPIGatewayInvokeEvent"
+  statement_id  = "AllowAPIGatewayInvokeEvent-${local.stage}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.get_event.function_name
   principal     = "apigateway.amazonaws.com"
@@ -374,7 +352,7 @@ resource "aws_lambda_permission" "allow_apigw_event" {
 }
 
 resource "aws_lambda_permission" "allow_apigw_token" {
-  statement_id  = "AllowAPIGatewayInvokeToken"
+  statement_id  = "AllowAPIGatewayInvokeToken-${local.stage}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.token_stub.function_name
   principal     = "apigateway.amazonaws.com"
@@ -382,7 +360,7 @@ resource "aws_lambda_permission" "allow_apigw_token" {
 }
 
 resource "aws_lambda_permission" "allow_apigw_authorizer" {
-  statement_id  = "AllowAPIGatewayInvokeAuthorizer"
+  statement_id  = "AllowAPIGatewayInvokeAuthorizer-${local.stage}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.authorizer.function_name
   principal     = "apigateway.amazonaws.com"
